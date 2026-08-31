@@ -48,11 +48,34 @@ async def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Миграции: добавляем недостающие колонки
+        cols = [
+            ("freebet", "REAL DEFAULT 0"),
+            ("freebet_wagered", "REAL DEFAULT 0"),
+            ("temp_balance", "REAL DEFAULT 0"),
+            ("temp_balance_expires", "TEXT"),
+            ("referrer_id", "INTEGER"),
+            ("is_partner", "INTEGER DEFAULT 0"),
+            ("total_deposited", "REAL DEFAULT 0"),
+            ("total_withdrawn", "REAL DEFAULT 0"),
+            ("total_wagered", "REAL DEFAULT 0"),
+            ("total_won", "REAL DEFAULT 0"),
+            ("referral_earned", "REAL DEFAULT 0"),
+            ("quick_cashouts", "INTEGER DEFAULT 0"),
+            ("is_new", "INTEGER DEFAULT 1"),
+            ("username", "TEXT"),
+            ("balance", "REAL DEFAULT 0"),
+        ]
+        for name, typedef in cols:
+            try:
+                await db.execute(f"ALTER TABLE users ADD COLUMN {name} {typedef}")
+            except Exception:
+                pass  # колонка уже есть
         await db.commit()
 
 async def ensure_user(user_id: int, username: str = "", freebet: float = 0):
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("SELECT user_id, is_new FROM users WHERE user_id = ?", (user_id,))
+        cur = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         if not row:
             await db.execute(
@@ -60,7 +83,7 @@ async def ensure_user(user_id: int, username: str = "", freebet: float = 0):
                 (user_id, username, freebet)
             )
             await db.commit()
-            return True  # new user
+            return True
         if username:
             await db.execute("UPDATE users SET username=? WHERE user_id=?", (username, user_id))
             await db.commit()
@@ -89,7 +112,6 @@ async def get_real_balance(user_id: int) -> float:
     return (u.get("balance") or 0) if u else 0.0
 
 async def get_withdrawable(user_id: int) -> float:
-    """Реальный баланс. Фрибет выводится только после x10 вагера."""
     u = await get_user(user_id)
     if not u: return 0.0
     real = u.get("balance") or 0
@@ -108,14 +130,14 @@ async def add_balance(user_id: int, amount: float, is_temp=False, hours=1):
                 "UPDATE users SET temp_balance=COALESCE(temp_balance,0)+?, temp_balance_expires=? WHERE user_id=?",
                 (amount, exp, user_id))
         else:
-            await db.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (amount, user_id))
+            await db.execute("UPDATE users SET balance=COALESCE(balance,0)+? WHERE user_id=?", (amount, user_id))
         await db.commit()
 
 async def subtract_balance(user_id: int, amount: float) -> bool:
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT balance, freebet, temp_balance, temp_balance_expires, freebet_wagered FROM users WHERE user_id=?",
+            "SELECT balance, freebet, temp_balance, temp_balance_expires FROM users WHERE user_id=?",
             (user_id,)) as cur:
             row = await cur.fetchone()
         if not row: return False
@@ -127,26 +149,21 @@ async def subtract_balance(user_id: int, amount: float) -> bool:
                 if datetime.fromisoformat(row["temp_balance_expires"]) > datetime.utcnow():
                     temp = row["temp_balance"]
             except: pass
-        total = real + fb + temp
-        if total < amount: return False
-
+        if real + fb + temp < amount: return False
         remaining = amount
-        # temp first
         if temp > 0 and remaining > 0:
             t = min(temp, remaining)
             await db.execute("UPDATE users SET temp_balance=temp_balance-? WHERE user_id=?", (t, user_id))
             remaining -= t
-        # freebet second (and track wager)
         if fb > 0 and remaining > 0:
             t = min(fb, remaining)
             await db.execute(
-                "UPDATE users SET freebet=freebet-?, freebet_wagered=freebet_wagered+? WHERE user_id=?",
+                "UPDATE users SET freebet=freebet-?, freebet_wagered=COALESCE(freebet_wagered,0)+? WHERE user_id=?",
                 (t, t, user_id))
             remaining -= t
         if remaining > 0:
             await db.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (remaining, user_id))
-        # always track wager on freebet path
-        await db.execute("UPDATE users SET total_wagered=total_wagered+? WHERE user_id=?", (amount, user_id))
+        await db.execute("UPDATE users SET total_wagered=COALESCE(total_wagered,0)+? WHERE user_id=?", (amount, user_id))
         await db.commit()
         return True
 
@@ -203,7 +220,7 @@ async def add_referral_earn(referrer_id, referred_id, amount, type_):
             "INSERT INTO referrals(referrer_id, referred_id, amount, type) VALUES(?,?,?,?)",
             (referrer_id, referred_id, amount, type_))
         await db.execute(
-            "UPDATE users SET balance=balance+?, referral_earned=COALESCE(referral_earned,0)+? WHERE user_id=?",
+            "UPDATE users SET balance=COALESCE(balance,0)+?, referral_earned=COALESCE(referral_earned,0)+? WHERE user_id=?",
             (amount, amount, referrer_id))
         await db.commit()
 
@@ -213,7 +230,7 @@ async def log_game(user_id, game_type, bet, result, profit, details=""):
             "INSERT INTO games(user_id, game_type, bet, result, profit, details) VALUES(?,?,?,?,?,?)",
             (user_id, game_type, bet, result, profit, details))
         if profit > 0:
-            await db.execute("UPDATE users SET total_won=total_won+? WHERE user_id=?", (profit, user_id))
+            await db.execute("UPDATE users SET total_won=COALESCE(total_won,0)+? WHERE user_id=?", (profit, user_id))
         await db.commit()
 
 async def create_transaction(user_id, type_, amount, external_id="", status="pending"):
@@ -226,7 +243,7 @@ async def create_transaction(user_id, type_, amount, external_id="", status="pen
 
 async def inc_quick(user_id):
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET quick_cashouts=quick_cashouts+1 WHERE user_id=?", (user_id,))
+        await db.execute("UPDATE users SET quick_cashouts=COALESCE(quick_cashouts,0)+1 WHERE user_id=?", (user_id,))
         await db.commit()
 
 async def reset_quick(user_id):
@@ -242,6 +259,6 @@ async def get_top(limit=3):
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT user_id, total_won FROM users WHERE total_won > 0 ORDER BY total_won DESC LIMIT ?",
+            "SELECT user_id, total_won FROM users WHERE COALESCE(total_won,0) > 0 ORDER BY total_won DESC LIMIT ?",
             (limit,)) as cur:
             return [dict(r) for r in await cur.fetchall()]
