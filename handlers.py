@@ -368,7 +368,7 @@ async def mines_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     await q.message.edit_text(
-        f"💣 <b>Мины</b>\n\nНапишите количество мин (1–24):",
+        f"💣 <b>Мины</b>\n\nНапишите количество мин (3–15):",
         reply_markup=back_play(), parse_mode="HTML"
     )
     context.user_data["waiting"] = "mines_cnt"
@@ -378,9 +378,9 @@ async def mines_cnt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cnt = int(update.message.text.strip())
     except:
-        await update.message.reply_text("Число от 1 до 24"); return W_MINES_CNT
-    if not 1 <= cnt <= 24:
-        await update.message.reply_text("От 1 до 24"); return W_MINES_CNT
+        await update.message.reply_text("Число от 3 до 15"); return W_MINES_CNT
+    if not 3 <= cnt <= 15:
+        await update.message.reply_text("От 3 до 15"); return W_MINES_CNT
     context.user_data["mines_cnt"] = cnt
     context.user_data["waiting"] = "mines"
     await update.message.reply_text(f"Мин: {cnt}. Введите ставку (мин. {MIN_BET}$):")
@@ -409,13 +409,15 @@ async def run_mines(update, context, bet):
 async def show_mines(update, context, edit=False):
     m = context.user_data.get("mines")
     if not m: return
+    from config import MINES_COLS
+    cols = MINES_COLS
     rows = []
-    for i in range(5):
+    for i in range(cols):
         row = []
-        for j in range(5):
-            idx = i*5+j
+        for j in range(cols):
+            idx = i*cols+j
             if idx in m["opened"]:
-                row.append(InlineKeyboardButton("📦", callback_data="noop"))
+                row.append(InlineKeyboardButton("✅", callback_data="noop"))
             else:
                 row.append(InlineKeyboardButton("📦", callback_data=f"mopen:{idx}"))
         rows.append(row)
@@ -453,18 +455,19 @@ async def mopen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # show only visible mines, ensure the hit cell is among them
         show = set(m["visible"])
         show.add(idx)
-        # build field display
+        from config import MINES_COLS
+        cols = MINES_COLS
         rows = []
-        for i in range(5):
+        for i in range(cols):
             row = []
-            for j in range(5):
-                cell = i*5+j
+            for j in range(cols):
+                cell = i*cols+j
                 if cell == idx:
                     row.append(InlineKeyboardButton("💥", callback_data="noop"))
                 elif cell in show:
                     row.append(InlineKeyboardButton("💣", callback_data="noop"))
                 elif cell in m["opened"]:
-                    row.append(InlineKeyboardButton("📦", callback_data="noop"))
+                    row.append(InlineKeyboardButton("✅", callback_data="noop"))
                 else:
                     row.append(InlineKeyboardButton("📦", callback_data="noop"))
             rows.append(row)
@@ -526,18 +529,23 @@ async def show_tower(update, context, edit=False):
     t = context.user_data.get("tower")
     if not t: return
     lv = t["level"]
-    mult = TOWER_MULT[lv]
-    win = t["bet"] * mult
+    next_mult = TOWER_MULT[lv]
+    next_win = t["bet"] * next_mult
+    cash_mult = TOWER_MULT[lv - 1] if lv > 0 else 0
+    cash_win = t["bet"] * cash_mult if lv > 0 else 0
     row = [InlineKeyboardButton("📦", callback_data=f"tpick:{i}") for i in range(5)]
     rows = [row]
     if lv > 0:
-        rows.append([InlineKeyboardButton(f"✅ Забрать {money(win)}", callback_data="tcash")])
+        rows.append([InlineKeyboardButton(f"✅ Забрать {money(cash_win)}", callback_data="tcash")])
     rows.append([InlineKeyboardButton("⬅️ Выход", callback_data="mini_games")])
     text = (
         f"🗼 Башня — ур. {lv+1}/5\n"
-        f"Ставка: {money(t['bet'])} | x{mult:.2f} → <b>{money(win)}</b>\n"
-        f"Выберите клетку:"
+        f"Ставка: {money(t['bet'])}\n"
+        f"Сейчас: x{next_mult:.2f} → <b>{money(next_win)}</b>"
     )
+    if lv > 0:
+        text += f"\nМожно забрать: <b>{money(cash_win)}</b> (x{cash_mult:.2f})"
+    text += "\nВыберите клетку:"
     kb = InlineKeyboardMarkup(rows)
     if edit and update.callback_query:
         await update.callback_query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -630,17 +638,23 @@ async def show_pyramid(update, context, edit=False):
     if not p: return
     lv = p["level"]
     n = PYRAMID_BTNS[lv]
-    mult = PYRAMID_MULT[lv]
-    win = p["bet"] * mult
+    # текущий множитель уровня (если пройдёшь)
+    next_mult = PYRAMID_MULT[lv]
+    next_win = p["bet"] * next_mult
+    # сумма при заборе = за уже пройденные уровни
+    cash_mult = PYRAMID_MULT[lv - 1] if lv > 0 else 0
+    cash_win = p["bet"] * cash_mult if lv > 0 else 0
     row = [InlineKeyboardButton("📦", callback_data=f"ppick:{i}") for i in range(n)]
     rows = [row]
     if lv > 0:
-        rows.append([InlineKeyboardButton(f"✅ Забрать {money(win)}", callback_data="pcash")])
+        rows.append([InlineKeyboardButton(f"✅ Забрать {money(cash_win)}", callback_data="pcash")])
     rows.append([InlineKeyboardButton("⬅️ Выход", callback_data="mini_games")])
     text = (
         f"🔺 Пирамида — ур. {lv+1}/5 ({n} клеток)\n"
-        f"x{mult:.2f} → <b>{money(win)}</b>"
+        f"Сейчас: x{next_mult:.2f} → <b>{money(next_win)}</b>"
     )
+    if lv > 0:
+        text += f"\nМожно забрать: <b>{money(cash_win)}</b> (x{cash_mult:.2f})"
     kb = InlineKeyboardMarkup(rows)
     if edit and update.callback_query:
         await update.callback_query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
