@@ -10,6 +10,18 @@ import random
 
 W_DEP, W_WD, W_BET, W_MINES_CNT = range(4)
 
+def win_text(amount: float) -> str:
+    return (
+        f"🔥💰 <b>ПОБЕДА!</b> 💰🔥\n\n"
+        f"🎉 Поздравляю!\n"
+        f"Вы выиграли <b>{money(amount)}</b>\n\n"
+        f"✨ Так держать! ✨"
+    )
+
+def lose_text() -> str:
+    return "💔 <b>Проигрыш</b>\n\nНе расстраивайтесь, попробуйте снова! 🍀"
+
+
 WELCOME = (
     "Привет, ты попал в <b>JackZo</b> — лучшее мини-казино в Telegram!\n\n"
     "Большие шансы на выигрыш!\n"
@@ -19,27 +31,23 @@ WELCOME = (
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
-    is_new = await ensure_user(u.id, u.username or "", freebet=FREEBET_AMOUNT if True else 0)
-    # only give freebet if truly new
-    user = await get_user(u.id)
-    if user and user.get("is_new") == 1 and (user.get("freebet") or 0) == 0:
-        async with __import__("aiosqlite").connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET freebet=?, is_new=0 WHERE user_id=?", (FREEBET_AMOUNT, u.id))
-            await db.commit()
-    elif user and user.get("is_new") == 1:
-        async with __import__("aiosqlite").connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET is_new=0 WHERE user_id=?", (u.id,))
-            await db.commit()
+    is_new = await ensure_user(u.id, u.username or "", freebet=FREEBET_AMOUNT)
 
     if context.args and context.args[0].startswith("ref_"):
         try:
             rid = int(context.args[0][4:])
             if rid != u.id:
                 await set_referrer(u.id, rid)
-        except: pass
+        except Exception:
+            pass
 
+    try:
+        from payments import process_paid_invoices
+        await process_paid_invoices(context.bot)
+    except Exception:
+        pass
     text = WELCOME
-    if is_new or (user and (user.get("freebet") or 0) > 0):
+    if is_new:
         text += f"\n\n🎁 Тебе начислен фрибет <b>{money(FREEBET_AMOUNT)}</b>!"
     await update.message.reply_text(text, reply_markup=main_menu(is_owner(u.id)), parse_mode="HTML")
 
@@ -139,26 +147,36 @@ async def wd_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if amount > wd:
         await update.message.reply_text("Недостаточно к выводу")
         return W_WD
-    # списываем с real
-    u = await get_user(update.effective_user.id)
-    real = u.get("balance") or 0
-    if amount <= real:
-        await subtract_balance(update.effective_user.id, amount)
+    ok = await subtract_balance(update.effective_user.id, amount)
+    if not ok:
+        await update.message.reply_text("❌ Ошибка списания")
+        return ConversationHandler.END
+    from payments import auto_withdraw
+    success, err = await auto_withdraw(update.effective_user.id, amount)
+    if success:
+        await update.message.reply_text(
+            f"✅ <b>Вывод {money(amount)} отправлен!</b>\nПроверьте @CryptoBot",
+            parse_mode="HTML"
+        )
     else:
-        # часть с freebet после условий
-        await subtract_balance(update.effective_user.id, amount)
-    tid = await create_transaction(update.effective_user.id, "withdraw", amount)
-    try:
-        await context.bot.send_message(OWNER_ID, f"💸 Вывод #{tid}\nUser: {update.effective_user.id}\n{money(amount)}")
-    except: pass
-    await update.message.reply_text(f"✅ Заявка на {money(amount)} создана")
+        tid = await create_transaction(update.effective_user.id, "withdraw", amount, status="pending")
+        try:
+            await context.bot.send_message(
+                OWNER_ID,
+                f"💸 Ручной вывод #{tid}\nUser: {update.effective_user.id}\n{money(amount)}\nОшибка API: {err}"
+            )
+        except Exception:
+            pass
+        await update.message.reply_text(
+            f"⏳ Заявка на {money(amount)} принята.\nЕсли авто-вывод не прошёл — владелец обработает вручную."
+        )
     return ConversationHandler.END
 
 # --- rating / referral ---
 async def rating_h(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    top = await get_top(3)
+    top = await get_top(3, exclude_id=OWNER_ID)
     medals = ["🥇", "🥈", "🥉"]
     text = "🏆 <b>Топ игроков</b>\n\n"
     if not top:
@@ -282,9 +300,26 @@ async def process_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bet < MIN_BET:
         await update.message.reply_text(f"Мин. {MIN_BET}$"); return W_BET
     if await get_balance(update.effective_user.id) < bet:
-        await update.message.reply_text("Недостаточно средств"); return ConversationHandler.END
+        await update.message.reply_text(
+            "❌ Недостаточно средств, пополните баланс!",
+            reply_markup=need_money_kb()
+        )
+        return ConversationHandler.END
 
     w = context.user_data.get("waiting")
+    if w == "setbet":
+        key = context.user_data.get("setbet_for", "mines")
+        context.user_data.setdefault("bets", {})[key] = bet
+        await update.message.reply_text(
+            f"✅ Ставка сохранена: <b>{money(bet)}</b>",
+            reply_markup=bet_saved_kb(key, bet),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+    # remember bet for game type
+    if w:
+        save_key = w if w != "author" else f"author:{context.user_data.get('author_key','x2')}"
+        context.user_data.setdefault("bets", {})[save_key] = bet
     if w == "author":
         return await run_author(update, context, bet)
     if w == "mines":
@@ -312,15 +347,20 @@ async def run_author(update, context, bet):
         await add_balance(uid, prize)
         await log_game(uid, f"author_{key}", bet, "win", prize - bet)
         await update.message.reply_text(
-            f"💰 Поздравляю, вы выиграли {money(prize)} 💰",
-            reply_markup=play_menu()
+            win_text(prize),
+            reply_markup=after_game_kb(f"author:{key}"),
+            parse_mode="HTML"
         )
     else:
         await log_game(uid, f"author_{key}", bet, "lose", -bet)
         ref = await get_referrer(uid)
         if ref and await is_partner(ref):
             await add_referral_earn(ref, uid, bet * 0.20, "loss")
-        await update.message.reply_text("💔 Проигрыш. Попробуйте снова!", reply_markup=play_menu())
+        await update.message.reply_text(
+            lose_text(),
+            reply_markup=after_game_kb(f"author:{key}"),
+            parse_mode="HTML"
+        )
     return ConversationHandler.END
 
 # --- MINES ---
@@ -458,8 +498,9 @@ async def mcash(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reset_quick(q.from_user.id)
     context.user_data.pop("mines", None)
     await q.message.edit_text(
-        f"💰 Поздравляю, вы выиграли {money(win)} 💰",
-        reply_markup=mini_games_menu()
+        win_text(win),
+        reply_markup=after_game_kb("mines"),
+        parse_mode="HTML"
     )
 
 # --- TOWER (horizontal row of 5) ---
@@ -523,7 +564,23 @@ async def tpick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ref and await is_partner(ref):
             await add_referral_earn(ref, q.from_user.id, t["bet"]*0.20, "loss")
         context.user_data.pop("tower", None)
-        await q.message.edit_text("💥 Мина! Проигрыш.", reply_markup=mini_games_menu())
+        # показываем только 1 видимую мину
+        hit_i = int(q.data.split(":")[1]) if ":" in q.data else 0
+        row = []
+        for i in range(5):
+            if i == hit_i:
+                row.append(InlineKeyboardButton("💥", callback_data="noop"))
+            else:
+                row.append(InlineKeyboardButton("📦", callback_data="noop"))
+        # одна "настоящая" мина в другой клетке для картинки
+        other = [i for i in range(5) if i != hit_i]
+        if other:
+            row[other[0]] = InlineKeyboardButton("💣", callback_data="noop")
+        await q.message.edit_text(
+            lose_text() + "\n\n💥 Вы попали на мину!",
+            reply_markup=InlineKeyboardMarkup([row] + after_game_kb("pyramid").inline_keyboard),
+            parse_mode="HTML"
+        )
         return
 
     t["level"] += 1
@@ -534,7 +591,7 @@ async def tpick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_game(q.from_user.id, "tower", t["bet"], "win", win - t["bet"])
         await reset_quick(q.from_user.id)
         context.user_data.pop("tower", None)
-        await q.message.edit_text(f"💰 Поздравляю, вы выиграли {money(win)} 💰", reply_markup=mini_games_menu())
+        await q.message.edit_text(win_text(win), reply_markup=after_game_kb("pyramid"), parse_mode="HTML")
         return
     await show_tower(update, context, edit=True)
 
@@ -551,7 +608,7 @@ async def tcash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if t["level"] == 1: await inc_quick(q.from_user.id)
     else: await reset_quick(q.from_user.id)
     context.user_data.pop("tower", None)
-    await q.message.edit_text(f"💰 Поздравляю, вы выиграли {money(win)} 💰", reply_markup=mini_games_menu())
+    await q.message.edit_text(win_text(win), reply_markup=after_game_kb("tower"), parse_mode="HTML")
 
 # --- PYRAMID ---
 async def pyramid_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -608,7 +665,24 @@ async def ppick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ref and await is_partner(ref):
             await add_referral_earn(ref, q.from_user.id, p["bet"]*0.20, "loss")
         context.user_data.pop("pyramid", None)
-        await q.message.edit_text("💥 Мина! Проигрыш.", reply_markup=mini_games_menu())
+        from config import PYRAMID_VIS
+        vis = PYRAMID_VIS[lv]
+        hit_i = int(q.data.split(":")[1]) if ":" in q.data else 0
+        row = []
+        bombs_left = vis - 1
+        for i in range(n):
+            if i == hit_i:
+                row.append(InlineKeyboardButton("💥", callback_data="noop"))
+            elif bombs_left > 0:
+                row.append(InlineKeyboardButton("💣", callback_data="noop"))
+                bombs_left -= 1
+            else:
+                row.append(InlineKeyboardButton("📦", callback_data="noop"))
+        await q.message.edit_text(
+            lose_text() + "\n\n💥 Вы попали на мину!",
+            reply_markup=InlineKeyboardMarkup([row] + after_game_kb("pyramid").inline_keyboard),
+            parse_mode="HTML"
+        )
         return
     p["level"] += 1
     if p["level"] >= 5:
@@ -616,7 +690,7 @@ async def ppick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await add_balance(q.from_user.id, win)
         await log_game(q.from_user.id, "pyramid", p["bet"], "win", win - p["bet"])
         context.user_data.pop("pyramid", None)
-        await q.message.edit_text(f"💰 Поздравляю, вы выиграли {money(win)} 💰", reply_markup=mini_games_menu())
+        await q.message.edit_text(win_text(win), reply_markup=after_game_kb("pyramid"), parse_mode="HTML")
         return
     await show_pyramid(update, context, edit=True)
 
@@ -631,7 +705,90 @@ async def pcash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await add_balance(q.from_user.id, win)
     await log_game(q.from_user.id, "pyramid", p["bet"], "win", win - p["bet"])
     context.user_data.pop("pyramid", None)
-    await q.message.edit_text(f"💰 Поздравляю, вы выиграли {money(win)} 💰", reply_markup=mini_games_menu())
+    await q.message.edit_text(win_text(win), reply_markup=after_game_kb("pyramid"), parse_mode="HTML")
+
+
+async def again_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    key = q.data.split(":", 1)[1]
+    # saved bet
+    bets = context.user_data.setdefault("bets", {})
+    bet = bets.get(key)
+    if not bet:
+        await q.message.edit_text(f"Введите ставку (мин. {MIN_BET}$):", reply_markup=back_play())
+        context.user_data["waiting"] = key if key in ("mines","tower","pyramid") else "author"
+        if key.startswith("author"):
+            context.user_data["author_key"] = key.split(":")[-1] if ":" in key else key.replace("author","x2")
+            context.user_data["waiting"] = "author"
+        else:
+            context.user_data["waiting"] = key
+        return W_BET
+    # play with saved bet
+    if await get_balance(q.from_user.id) < bet:
+        await q.message.edit_text("❌ Недостаточно средств, пополните баланс!", reply_markup=need_money_kb())
+        return
+    context.user_data["waiting"] = "author" if key.startswith("author") or key.startswith("x") else key
+    if key.startswith("author"):
+        context.user_data["author_key"] = key.split(":")[-1]
+        # simulate message with bet
+        class Fake:
+            pass
+        # just call run directly
+        from telegram import Message
+        await run_author_from_cb(q, context, bet, key)
+        return
+    if key == "mines":
+        context.user_data["mines_cnt"] = context.user_data.get("mines_cnt", 3)
+        # need message-like - use callback path
+        await q.message.edit_text(f"Ставка {bet}$ — начинаем...")
+        # manual start
+        uid = q.from_user.id
+        await subtract_balance(uid, bet)
+        chosen = context.user_data.get("mines_cnt", 3)
+        from games import gen_field
+        from utils import secret_mines
+        real_n = secret_mines(chosen)
+        field = gen_field(real_n)
+        visible = set(list(field)[:chosen]) if field else set()
+        context.user_data["mines"] = {
+            "bet": bet, "chosen": chosen, "field": field, "visible": visible,
+            "opened": [], "force": (await get_quick(uid)) >= 10, "rc": await role_chance(uid)
+        }
+        await show_mines(update, context, edit=True)
+        return
+    await q.message.edit_text(f"Введите ставку или используйте сохранённую.\nМин. {MIN_BET}$", reply_markup=back_play())
+    context.user_data["waiting"] = key
+    return W_BET
+
+async def setbet_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    key = q.data.split(":", 1)[1]
+    context.user_data["setbet_for"] = key
+    await q.message.edit_text(f"✏️ Введите новую ставку (мин. {MIN_BET}$):", reply_markup=back_play())
+    context.user_data["waiting"] = "setbet"
+    return W_BET
+
+async def run_author_from_cb(q, context, bet, key):
+    uid = q.from_user.id
+    ak = key.split(":")[-1] if ":" in key else "x2"
+    context.user_data["author_key"] = ak
+    mult, vis, real_ch = AUTHOR_GAMES.get(ak, AUTHOR_GAMES["x2"])
+    await subtract_balance(uid, bet)
+    rc = await role_chance(uid)
+    win = roll(rc if rc is not None else real_ch)
+    if win:
+        prize = bet * mult
+        await add_balance(uid, prize)
+        await log_game(uid, f"author_{ak}", bet, "win", prize - bet)
+        await q.message.edit_text(win_text(prize), reply_markup=after_game_kb(f"author:{ak}"), parse_mode="HTML")
+    else:
+        await log_game(uid, f"author_{ak}", bet, "lose", -bet)
+        ref = await get_referrer(uid)
+        if ref and await is_partner(ref):
+            await add_referral_earn(ref, uid, bet * 0.20, "loss")
+        await q.message.edit_text(lose_text(), reply_markup=after_game_kb(f"author:{ak}"), parse_mode="HTML")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()

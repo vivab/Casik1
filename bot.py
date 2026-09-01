@@ -61,6 +61,9 @@ def main():
     app.add_handler(CallbackQueryHandler(ppick, pattern=r"^ppick:"))
     app.add_handler(CallbackQueryHandler(pcash, pattern=r"^pcash$"))
     app.add_handler(CallbackQueryHandler(noop, pattern=r"^noop$"))
+    app.add_handler(CallbackQueryHandler(again_game, pattern=r"^again:"))
+    app.add_handler(CallbackQueryHandler(setbet_game, pattern=r"^setbet:"))
+
 
     print("JackZo casino bot started")
     app.run_polling(allowed_updates=["message", "callback_query"])

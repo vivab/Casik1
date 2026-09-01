@@ -255,10 +255,26 @@ async def get_quick(user_id) -> int:
     u = await get_user(user_id)
     return (u.get("quick_cashouts") or 0) if u else 0
 
-async def get_top(limit=3):
+async def get_top(limit=3, exclude_id: int = 0):
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT user_id, total_won FROM users WHERE COALESCE(total_won,0) > 0 ORDER BY total_won DESC LIMIT ?",
-            (limit,)) as cur:
+            "SELECT user_id, total_won FROM users WHERE COALESCE(total_won,0) > 0 AND user_id != ? ORDER BY total_won DESC LIMIT ?",
+            (exclude_id, limit)) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+async def mark_invoice_done(invoice_id: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "UPDATE transactions SET status='paid' WHERE external_id=? AND status='pending'",
+            (str(invoice_id),))
+        await db.commit()
+
+async def find_pending_deposit(invoice_id: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM transactions WHERE external_id=? AND type='deposit' AND status='pending'",
+            (str(invoice_id),)) as cur:
+            r = await cur.fetchone()
+            return dict(r) if r else None

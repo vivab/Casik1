@@ -45,6 +45,27 @@ def balance_menu():
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_main")],
     ])
 
+def need_money_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Пополнить", callback_data="deposit")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_main")],
+    ])
+
+def after_game_kb(game_cb: str):
+    """Сыграть снова / Изменить ставку / В меню"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Сыграть снова", callback_data=f"again:{game_cb}")],
+        [InlineKeyboardButton("✏️ Изменить ставку", callback_data=f"setbet:{game_cb}")],
+        [InlineKeyboardButton("🏠 В меню", callback_data="back_main")],
+    ])
+
+def bet_saved_kb(game_cb: str, bet: float):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💵 Ставка: {bet:.2f}$ — Играть!", callback_data=f"go:{game_cb}")],
+        [InlineKeyboardButton("✏️ Изменить ставку", callback_data=f"setbet:{game_cb}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="play")],
+    ])
+
 def back_main():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_main")]])
 
